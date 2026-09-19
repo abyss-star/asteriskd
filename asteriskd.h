@@ -76,7 +76,12 @@ struct asteriskd_resource_operation;
     ASTERISKD_ANONYMOUS_SEAL_SEAL)
 #define ASTERISKD_IPTABLES_WAIT_SECONDS 100U
 #define ASTERISKD_ROUTE_RULE_PRIORITY 14599U
+// RELAY marks the datagrams the fake IP relay takes over. They are routed to the
+// same local table as proxied traffic, but through a rule of their own, so a
+// relayed datagram can never be mistaken for a proxied one.
+#define ASTERISKD_RELAY_ROUTE_RULE_PRIORITY 14598U
 #define ASTERISKD_PRIMARY_MARK UINT32_C(0x20000000)
+#define ASTERISKD_RELAY_MARK UINT32_C(0x40000000)
 #define ASTERISKD_MARK_MASK UINT32_C(0x60000000)
 #define ASTERISKD_TPROXY_TABLE 160U
 #define ASTERISKD_TUN_TABLE 168U
@@ -325,6 +330,15 @@ enum asteriskd_dns_hijack_scope {
 #define ASTERISKD_FAKE_IP_RELAY_PORT_TEXT "65534"
 #if ASTERISKD_FAKE_IP_RELAY_PORT != 65534U
 #error "ASTERISKD_FAKE_IP_RELAY_PORT_TEXT must match ASTERISKD_FAKE_IP_RELAY_PORT."
+#endif
+// The relay serves locally generated connections over two transports with
+// different delivery mechanisms: established connections are redirected to the
+// core's redir inbound, while datagrams have to be handed over with TPROXY and
+// therefore need an endpoint of their own.
+#define ASTERISKD_FAKE_IP_RELAY_UDP_PORT 65533U
+#define ASTERISKD_FAKE_IP_RELAY_UDP_PORT_TEXT "65533"
+#if ASTERISKD_FAKE_IP_RELAY_UDP_PORT != 65533U
+#error "ASTERISKD_FAKE_IP_RELAY_UDP_PORT_TEXT must match ASTERISKD_FAKE_IP_RELAY_UDP_PORT."
 #endif
 
 enum asteriskd_helper_type {
@@ -1161,6 +1175,7 @@ enum asteriskd_rule_id {
 
 enum asteriskd_ip_rule_id {
     ASTERISKD_IP_RULE_TPROXY,
+    ASTERISKD_IP_RULE_TPROXY_RELAY,
     ASTERISKD_IP_RULE_TUNNEL,
     ASTERISKD_IP_RULE_TOKEN,
     ASTERISKD_IP_RULE_COUNT,
@@ -1566,6 +1581,9 @@ bool asteriskd_xtables_private_chain_shape_valid(
     const char *, size_t, const char *, size_t);
 size_t asteriskd_xtables_fake_dns_arguments(const char *, const char **);
 size_t asteriskd_xtables_fake_ip_relay_arguments(const char *, const char **);
+size_t asteriskd_xtables_fake_ip_relay_mark_arguments(const char *, const char *, const char **);
+size_t asteriskd_xtables_fake_ip_relay_datagram_arguments(const char **);
+bool asteriskd_fake_ip_relay_enabled(const struct asteriskd_config *);
 int asteriskd_xtables_private_chain_counts(
     const char *, size_t, const char *, size_t *, size_t *);
 size_t asteriskd_xtables_hook_arguments(

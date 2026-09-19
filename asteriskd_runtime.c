@@ -2891,13 +2891,38 @@ static int system_append_dns_mark(struct asteriskd_system_supervisor *system,
             sizeof(plain) / sizeof(plain[0]));
 }
 
-// The relay only has a purpose while the platform resolver hands out fake
-// answers and the policy actually leaves applications out of the proxy.
-static bool system_fake_ip_relay_enabled(const struct asteriskd_config *config) {
-    return config->mode == ASTERISKD_MODE_TPROXY &&
-        config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_APP_POLICY &&
-        config->app_policy_mode != ASTERISKD_APP_POLICY_GLOBAL &&
-        config->enable_fake_dns && config->has_fake_dns_ipv4_pool;
+// A datagram the policy leaves out reaches the core the same way proxied
+// datagrams do, but under a mark of its own, so the TPROXY step can tell the
+// two apart and pick the inbound that connects without the proxy.
+static int system_append_relay_mark_unmarked(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain) {
+    const char *arguments[24U];
+    size_t count = asteriskd_xtables_fake_ip_relay_mark_arguments(
+        system->loaded_config.config.fake_dns_ipv4_pool, NULL, arguments);
+    if (count == 0U) return -1;
+    return system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+        "-A", chain, arguments, count);
+}
+
+static int system_append_relay_mark_uid(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain, uint32_t uid) {
+    char uid_text[16U];
+    if (snprintf(uid_text, sizeof(uid_text), "%" PRIu32, uid) <= 0) return -1;
+    const char *arguments[24U];
+    size_t count = asteriskd_xtables_fake_ip_relay_mark_arguments(
+        system->loaded_config.config.fake_dns_ipv4_pool, uid_text, arguments);
+    if (count == 0U) return -1;
+    return system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+        "-A", chain, arguments, count);
+}
+
+static int system_append_relay_datagram(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain) {
+    const char *arguments[24U];
+    size_t count = asteriskd_xtables_fake_ip_relay_datagram_arguments(arguments);
+    if (count == 0U) return -1;
+    return system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+        "-A", chain, arguments, count);
 }
 
 static int system_append_dns_tproxy(struct asteriskd_system_supervisor *system,
@@ -3042,6 +3067,11 @@ static int system_populate_tproxy_prerouting(
     }
     if (system_append_tproxy(system, family, chain, "tcp", NULL, NULL, true, NULL) != 0 ||
         system_append_tproxy(system, family, chain, "udp", NULL, NULL, true, NULL) != 0) return -1;
+    // Relayed datagrams carry a mark of their own, so the general datagram rule
+    // above never sees them and this one never sees proxied traffic.
+    if (family == ASTERISKD_IP_FAMILY_IPV4 &&
+        asteriskd_fake_ip_relay_enabled(config) &&
+        system_append_relay_datagram(system, family, chain) != 0) return -1;
     const char *matcher_path = NULL;
     if (config->matcher.enabled) {
         matcher_path = system_pin_path(system, family == ASTERISKD_IP_FAMILY_IPV4
@@ -3067,8 +3097,20 @@ static int system_populate_tproxy_output(
     }
     if (system_populate_common_output_prefix(
             system, family, chain, local_begin, local_end) != 0) return -1;
+    // A datagram the policy leaves out has to reach the core, which is the only
+    // side able to turn the fake address back into a domain. Which applications
+    // those are is expressed by uid while the policy is a blacklist: there the
+    // non proxied applications are returned before anything is marked, so the
+    // absence of the proxy mark cannot tell them apart yet.
+    bool relay = family == ASTERISKD_IP_FAMILY_IPV4 &&
+        asteriskd_fake_ip_relay_enabled(config);
+    bool relay_by_uid = relay && !config->matcher.enabled &&
+        config->app_policy_mode == ASTERISKD_APP_POLICY_BLACKLIST;
     if (!config->matcher.enabled && config->app_policy_mode == ASTERISKD_APP_POLICY_BLACKLIST) {
         for (size_t remaining = config->uid_count; remaining > 0U; --remaining) {
+            if (relay_by_uid &&
+                system_append_relay_mark_uid(system, family, chain,
+                    config->uids[remaining - 1U]) != 0) return -1;
             if (system_append_uid_return(system, family, chain,
                     config->uids[remaining - 1U]) != 0) return -1;
         }
@@ -3077,7 +3119,12 @@ static int system_populate_tproxy_output(
         if (system_append_return_interface(system, family, chain, false,
                 config->ignored_interfaces[index]) != 0) return -1;
     }
-    return system_append_policy_output(system, family, chain);
+    if (system_append_policy_output(system, family, chain) != 0) return -1;
+    // Everywhere else the applications the policy leaves out are the ones no
+    // rule has marked by now, so they are taken over at the end of the chain.
+    if (relay && !relay_by_uid &&
+        system_append_relay_mark_unmarked(system, family, chain) != 0) return -1;
+    return 0;
 }
 
 static int system_populate_tun_prerouting(
@@ -3204,7 +3251,7 @@ static int system_populate_private_chain(
         // policy leaves out as well. Those connections are redirected to the
         // core's direct inbound on the locally generated path only: forwarded
         // traffic is already given to the core as a whole.
-        if (!system_fake_ip_relay_enabled(config) ||
+        if (!asteriskd_fake_ip_relay_enabled(config) ||
             strcmp(chain, group->names[0]) != 0) return 0;
         const char *relay[24U];
         size_t relay_count = asteriskd_xtables_fake_ip_relay_arguments(pool, relay);

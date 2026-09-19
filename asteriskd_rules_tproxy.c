@@ -110,6 +110,24 @@ static int add_normal_route(
     return 0;
 }
 
+// Relayed datagrams are routed into the same local table as proxied traffic,
+// but through a rule of their own: the table is what makes them locally
+// deliverable, and the separate selector is what keeps them distinguishable
+// from proxied traffic when the TPROXY step picks an inbound for them.
+static int add_relay_route(
+    struct asteriskd_rule_transaction_plan *plan,
+    enum asteriskd_ip_family family) {
+    struct asteriskd_route_effect *rule =
+        add_route(plan, ASTERISKD_ROUTE_EFFECT_IP_RULE, family);
+    if (rule == NULL) return ASTERISKD_CONFIG_INVALID;
+    rule->table = ASTERISKD_TPROXY_TABLE;
+    rule->priority = ASTERISKD_RELAY_ROUTE_RULE_PRIORITY;
+    rule->mark = ASTERISKD_RELAY_MARK;
+    rule->mark_mask = ASTERISKD_MARK_MASK;
+    rule->ip_rule_id = ASTERISKD_IP_RULE_TPROXY_RELAY;
+    return 0;
+}
+
 int asteriskd_tproxy_rule_transaction_plan_build(
     const struct asteriskd_config *config,
     bool has_global_ipv6_address,
@@ -127,6 +145,10 @@ int asteriskd_tproxy_rule_transaction_plan_build(
         add_private_name(local4, "ASTERISK_LOCAL4_BEGIN") != 0 ||
         add_private_name(local4, "ASTERISK_LOCAL4_END") != 0 ||
         add_normal_route(plan, ASTERISKD_IP_FAMILY_IPV4) != 0) {
+        return ASTERISKD_CONFIG_INVALID;
+    }
+    if (asteriskd_fake_ip_relay_enabled(config) &&
+        add_relay_route(plan, ASTERISKD_IP_FAMILY_IPV4) != 0) {
         return ASTERISKD_CONFIG_INVALID;
     }
     struct asteriskd_traffic_hook_group *hooks4 = add_hook_group(plan,

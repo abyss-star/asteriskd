@@ -12,6 +12,12 @@ struct output_token {
     size_t length;
 };
 
+// Rule arguments that the private chain verification matches against the kernel
+// output long after they were built have to stay valid for the whole process
+// lifetime, so every mark is spelled out as a literal.
+static const char *const primary_mark_text = "0x20000000/0x60000000";
+static const char *const relay_mark_text = "0x40000000/0x60000000";
+
 static bool output_token_equals(const struct output_token *token, const char *text) {
     size_t length = strlen(text);
     return token->length == length && memcmp(token->bytes, text, length) == 0;
@@ -258,7 +264,7 @@ size_t asteriskd_xtables_fake_ip_relay_arguments(
     arguments[5] = "mark";
     arguments[6] = "!";
     arguments[7] = "--mark";
-    arguments[8] = "0x20000000/0x60000000";
+    arguments[8] = primary_mark_text;
     arguments[9] = "-m";
     arguments[10] = "owner";
     arguments[11] = "!";
@@ -269,6 +275,87 @@ size_t asteriskd_xtables_fake_ip_relay_arguments(
     arguments[16] = "--to-ports";
     arguments[17] = ASTERISKD_FAKE_IP_RELAY_PORT_TEXT;
     return 18U;
+}
+
+// Datagrams cannot be handed over the way connections are: the core's redir
+// inbound only serves TCP, so a redirected datagram would never be read.
+// Instead the datagram is marked, routed into the local table by a rule of its
+// own and taken over by a TPROXY inbound, which is how the core receives
+// datagrams for proxied applications already.
+//
+// The mark has to select the applications the policy leaves out, and which
+// shape expresses that depends on the policy: a blacklist without a matcher
+// makes them known by uid, everything else by the absence of the proxy mark.
+// A NULL uid selects the latter.
+size_t asteriskd_xtables_fake_ip_relay_mark_arguments(
+    const char *pool, const char *uid, const char **arguments) {
+    size_t pool_length = pool == NULL ? 0U : strnlen(pool, ASTERISKD_MAX_CIDR);
+    if (arguments == NULL || pool_length == 0U || pool_length >= ASTERISKD_MAX_CIDR ||
+        strpbrk(pool, " \t\r\n") != NULL) return 0U;
+    if (uid != NULL) {
+        size_t uid_length = strnlen(uid, 16U);
+        if (uid_length == 0U || uid_length >= 16U ||
+            strspn(uid, "0123456789") != uid_length) return 0U;
+    }
+    size_t count = 0U;
+    arguments[count++] = "-d";
+    arguments[count++] = pool;
+    arguments[count++] = "-p";
+    arguments[count++] = "udp";
+    if (uid == NULL) {
+        arguments[count++] = "-m";
+        arguments[count++] = "mark";
+        arguments[count++] = "!";
+        arguments[count++] = "--mark";
+        arguments[count++] = primary_mark_text;
+    } else {
+        arguments[count++] = "-m";
+        arguments[count++] = "owner";
+        arguments[count++] = "--uid-owner";
+        arguments[count++] = uid;
+    }
+    arguments[count++] = "-m";
+    arguments[count++] = "owner";
+    arguments[count++] = "!";
+    arguments[count++] = "--gid-owner";
+    arguments[count++] = "3005";
+    arguments[count++] = "-j";
+    arguments[count++] = "MARK";
+    arguments[count++] = "--set-xmark";
+    arguments[count++] = relay_mark_text;
+    return count;
+}
+
+// Takes over the marked datagrams on the local path. The destination is kept
+// unchanged, so the core still learns the fake address the application wanted
+// to reach.
+size_t asteriskd_xtables_fake_ip_relay_datagram_arguments(const char **arguments) {
+    if (arguments == NULL) return 0U;
+    size_t count = 0U;
+    arguments[count++] = "-p";
+    arguments[count++] = "udp";
+    arguments[count++] = "-m";
+    arguments[count++] = "mark";
+    arguments[count++] = "--mark";
+    arguments[count++] = relay_mark_text;
+    arguments[count++] = "-j";
+    arguments[count++] = "TPROXY";
+    arguments[count++] = "--on-port";
+    arguments[count++] = ASTERISKD_FAKE_IP_RELAY_UDP_PORT_TEXT;
+    arguments[count++] = "--on-ip";
+    arguments[count++] = "0.0.0.0";
+    arguments[count++] = "--tproxy-mark";
+    arguments[count++] = relay_mark_text;
+    return count;
+}
+
+// The relay only has a purpose while the platform resolver hands out fake
+// answers and the policy actually leaves applications out of the proxy.
+bool asteriskd_fake_ip_relay_enabled(const struct asteriskd_config *config) {
+    return config != NULL && config->mode == ASTERISKD_MODE_TPROXY &&
+        config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_APP_POLICY &&
+        config->app_policy_mode != ASTERISKD_APP_POLICY_GLOBAL &&
+        config->enable_fake_dns && config->has_fake_dns_ipv4_pool;
 }
 
 int asteriskd_xtables_private_chain_counts(
