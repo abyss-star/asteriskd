@@ -2964,6 +2964,14 @@ static int system_append_tproxy(struct asteriskd_system_supervisor *system,
         "-A", chain, arguments, count);
 }
 
+// Local DNS interception is never limited to a uid. The platform resolver
+// answers for every application at once, so an intercepted query cannot be
+// attributed to the application that asked for it: the applications the policy
+// leaves out are kept working by the fake address relay below instead.
+//
+// The rule has to stay ahead of the application policy rules and ahead of the
+// private destination bypasses, because those return before the query could be
+// marked and the resolver reaches its configured server address directly.
 static int system_append_dns_mark(struct asteriskd_system_supervisor *system,
     enum asteriskd_ip_family family, const char *chain, bool bypass_core_gid) {
     const char *plain[] = {"-p", "udp", "-m", "udp", "--dport", "53",
@@ -2975,6 +2983,120 @@ static int system_append_dns_mark(struct asteriskd_system_supervisor *system,
         "-A", chain, bypass_core_gid ? bypass : plain,
         bypass_core_gid ? sizeof(bypass) / sizeof(bypass[0]) :
             sizeof(plain) / sizeof(plain[0]));
+}
+
+// Traffic the policy leaves out reaches the core the same way proxied traffic
+// does, but under a mark of its own, so the transparent step can tell the two
+// apart and pick the inbound that connects without the proxy. Both transports
+// are marked, because the relay serves connections and datagrams alike.
+static const char *const system_relay_protocols[] = {"tcp", "udp"};
+static const size_t system_relay_protocol_count =
+    sizeof(system_relay_protocols) / sizeof(system_relay_protocols[0]);
+
+static int system_append_relay_mark_unmarked(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain) {
+    for (size_t index = 0U; index < system_relay_protocol_count; ++index) {
+        const char *arguments[24U];
+        size_t count = asteriskd_xtables_fake_ip_relay_mark_arguments(
+            system->loaded_config.config.fake_dns_ipv4_pool, NULL,
+            system_relay_protocols[index], arguments);
+        if (count == 0U) return -1;
+        if (system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+                "-A", chain, arguments, count) != 0) return -1;
+    }
+    return 0;
+}
+
+static int system_append_relay_mark_uid(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain, uint32_t uid) {
+    char uid_text[16U];
+    if (snprintf(uid_text, sizeof(uid_text), "%" PRIu32, uid) <= 0) return -1;
+    for (size_t index = 0U; index < system_relay_protocol_count; ++index) {
+        const char *arguments[24U];
+        size_t count = asteriskd_xtables_fake_ip_relay_mark_arguments(
+            system->loaded_config.config.fake_dns_ipv4_pool, uid_text,
+            system_relay_protocols[index], arguments);
+        if (count == 0U) return -1;
+        if (system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+                "-A", chain, arguments, count) != 0) return -1;
+    }
+    return 0;
+}
+
+static int system_append_relay_transparent(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain) {
+    char port[8U];
+    if (snprintf(port, sizeof(port), "%u",
+            (unsigned)system->loaded_config.config.fake_ip_relay_port) <= 0) return -1;
+    for (size_t index = 0U; index < system_relay_protocol_count; ++index) {
+        const char *arguments[24U];
+        size_t count = asteriskd_xtables_fake_ip_relay_transparent_arguments(
+            system->loaded_config.config.fake_dns_ipv4_pool, port,
+            system_relay_protocols[index], arguments);
+        if (count == 0U) return -1;
+        if (system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+                "-A", chain, arguments, count) != 0) return -1;
+    }
+    return 0;
+}
+
+static int system_append_relay_mark_all(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain) {
+    for (size_t index = 0U; index < system_relay_protocol_count; ++index) {
+        const char *arguments[24U];
+        size_t count = asteriskd_xtables_fake_ip_relay_mark_all_arguments(
+            system->loaded_config.config.fake_dns_ipv4_pool,
+            system_relay_protocols[index], arguments);
+        if (count == 0U) return -1;
+        if (system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+                "-A", chain, arguments, count) != 0) return -1;
+    }
+    return 0;
+}
+
+static int system_append_relay_return_uid(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain, uint32_t uid) {
+    char uid_text[16U];
+    if (snprintf(uid_text, sizeof(uid_text), "%" PRIu32, uid) <= 0) return -1;
+    for (size_t index = 0U; index < system_relay_protocol_count; ++index) {
+        const char *arguments[24U];
+        size_t count = asteriskd_xtables_fake_ip_relay_return_arguments(
+            system->loaded_config.config.fake_dns_ipv4_pool, uid_text,
+            system_relay_protocols[index], arguments);
+        if (count == 0U) return -1;
+        if (system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+                "-A", chain, arguments, count) != 0) return -1;
+    }
+    return 0;
+}
+
+// Selects the applications the relay takes over. TPROXY and TUN2SOCKS mark the
+// applications they proxy, so there the relay is everything that stayed
+// unmarked, and a blacklist without a matcher is the one policy that has to name
+// its applications by uid because nothing is marked before they are returned.
+// BPF2SOCKS decides in the kernel instead and marks nothing: there the relay
+// follows the same uid list the eBPF program uses.
+static int system_append_relay_marks(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain) {
+    const struct asteriskd_config *config = &system->loaded_config.config;
+    bool whitelist = config->app_policy_mode == ASTERISKD_APP_POLICY_WHITELIST;
+    bool by_uid = config->mode == ASTERISKD_MODE_BPF2SOCKS ||
+        (!config->matcher.enabled && !whitelist);
+    if (!by_uid) return system_append_relay_mark_unmarked(system, family, chain);
+    if (!whitelist) {
+        for (size_t remaining = config->uid_count; remaining > 0U; --remaining) {
+            if (system_append_relay_mark_uid(system, family, chain,
+                    config->uids[remaining - 1U]) != 0) return -1;
+        }
+        return 0;
+    }
+    // A whitelist anyway knows the applications it proxies, so the relay returns
+    // their traffic and marks whatever is left behind them.
+    for (size_t index = 0U; index < config->uid_count; ++index) {
+        if (system_append_relay_return_uid(system, family, chain,
+                config->uids[index]) != 0) return -1;
+    }
+    return system_append_relay_mark_all(system, family, chain);
 }
 
 static int system_append_dns_tproxy(struct asteriskd_system_supervisor *system,
@@ -3273,9 +3395,26 @@ static int system_populate_private_chain(
         const char *arguments[10U];
         size_t argument_count = asteriskd_xtables_fake_dns_arguments(pool, arguments);
         if (argument_count == 0U) return -1;
+        // The platform resolver hands a fake answer to applications the policy
+        // leaves out as well. Their traffic reaches the core through the
+        // transparent rules of the relay instead, which serve locally generated
+        // connections and datagrams alike.
         return system_xtables_zero(system, ASTERISKD_IP_FAMILY_IPV4,
             ASTERISKD_IP_TABLE_NAT, "-A", chain, arguments,
             argument_count);
+    }
+    if (group->chain_id == ASTERISKD_CHAIN_FAKE_IP_RELAY) {
+        if (!asteriskd_fake_ip_relay_enabled(&system->loaded_config.config)) return -1;
+        // The mark routes relayed traffic into the local table, which delivers it
+        // on this device: the takeover below then hands it to the core under the
+        // address the application used.
+        if (strstr(chain, "PREROUTING") != NULL) {
+            return system_append_relay_transparent(system, family, chain);
+        }
+        if (strstr(chain, "OUTPUT") != NULL) {
+            return system_append_relay_marks(system, family, chain);
+        }
+        return -1;
     }
     return -1;
 }
