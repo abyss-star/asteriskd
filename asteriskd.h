@@ -301,24 +301,24 @@ enum asteriskd_app_policy_mode {
 
 // DNS interception scope for locally generated queries.
 //
-// ASTERISKD_DNS_HIJACK_GLOBAL intercepts DNS for every uid.
+// ASTERISKD_DNS_HIJACK_GLOBAL intercepts DNS for every uid and leaves the
+// applications the policy excludes to the address the core answered with.
 //
-// ASTERISKD_DNS_HIJACK_APP_POLICY follows the application policy instead: only
-// selected applications have their own DNS queries intercepted, while the
-// Android resolver uids (root and AID_DNS) always stay on the system resolver,
-// under both policies. Those queries answer for every application at once, so
-// they cannot be attributed to the proxy and a fake answer handed to them would
-// reach applications the policy excludes. The configured answer mode
-// (fake-ip or redir-host) is unaffected by this scope.
+// ASTERISKD_DNS_HIJACK_APP_POLICY intercepts DNS for every uid as well and
+// additionally keeps the excluded applications working: the Android resolver
+// answers for every application at once, so a fake answer reaches applications
+// the policy excludes. Those connections are handed to the supervised core's
+// direct inbound instead of being sent to an address only the core can
+// translate. The configured answer mode (fake-ip or redir-host) is never
+// rewritten by this scope.
 enum asteriskd_dns_hijack_scope {
     ASTERISKD_DNS_HIJACK_GLOBAL,
     ASTERISKD_DNS_HIJACK_APP_POLICY,
 };
 
-// The Android resolver (netd) performs application name resolution through
-// these uids, so they can never be attributed to a single application.
-#define ASTERISKD_SYSTEM_UID 0U
-#define ASTERISKD_SYSTEM_DNS_UID 1052U
+// Port of the supervised core's direct inbound. It is fixed rather than
+// configured so both sides of the contract agree on the same local endpoint.
+#define ASTERISKD_FAKE_IP_RELAY_PORT 65534U
 
 enum asteriskd_helper_type {
     ASTERISKD_HELPER_NONE,
@@ -510,9 +510,6 @@ struct asteriskd_packet_model_input {
     bool icmp_echo;
     bool bypass_uid;
     bool uid_listed;
-    // Set when the packet belongs to a platform resolver uid (root or AID_DNS):
-    // such a query cannot be attributed to the application that asked for it.
-    bool system_resolver_uid;
     bool core_gid;
     bool local_address;
     bool proxy_private;
@@ -1561,6 +1558,7 @@ void asteriskd_rules_runtime_init(struct asteriskd_rules_runtime *);
 bool asteriskd_xtables_private_chain_shape_valid(
     const char *, size_t, const char *, size_t);
 size_t asteriskd_xtables_fake_dns_arguments(const char *, const char **);
+size_t asteriskd_xtables_fake_ip_relay_arguments(const char *, const char **);
 int asteriskd_xtables_private_chain_counts(
     const char *, size_t, const char *, size_t *, size_t *);
 size_t asteriskd_xtables_hook_arguments(

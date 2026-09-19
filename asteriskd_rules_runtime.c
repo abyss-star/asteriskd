@@ -238,6 +238,41 @@ size_t asteriskd_xtables_fake_dns_arguments(
     return 10U;
 }
 
+// A fake answer is only routable through the core that produced it. When the
+// application policy leaves a connection out, it is not handed to the core, so
+// the fake address the platform resolver delivered would stay unreachable. Such
+// connections are redirected to the core's direct inbound, which resolves the
+// fake address back to its domain and connects without the proxy. Only
+// traffic the policy did not mark is redirected, and the supervised core is
+// exempt so its own direct connections cannot be captured again.
+size_t asteriskd_xtables_fake_ip_relay_arguments(
+    const char *pool, const char **arguments) {
+    size_t pool_length = pool == NULL ? 0U : strnlen(pool, ASTERISKD_MAX_CIDR);
+    if (arguments == NULL || pool_length == 0U || pool_length >= ASTERISKD_MAX_CIDR ||
+        strpbrk(pool, " \t\r\n") != NULL) return 0U;
+    char port[8U];
+    if (snprintf(port, sizeof(port), "%u", (unsigned)ASTERISKD_FAKE_IP_RELAY_PORT) <= 0) return 0U;
+    arguments[0] = "-d";
+    arguments[1] = pool;
+    arguments[2] = "-p";
+    arguments[3] = "tcp";
+    arguments[4] = "-m";
+    arguments[5] = "mark";
+    arguments[6] = "!";
+    arguments[7] = "--mark";
+    arguments[8] = "0x20000000/0x60000000";
+    arguments[9] = "-m";
+    arguments[10] = "owner";
+    arguments[11] = "!";
+    arguments[12] = "--gid-owner";
+    arguments[13] = "3005";
+    arguments[14] = "-j";
+    arguments[15] = "REDIRECT";
+    arguments[16] = "--to-ports";
+    arguments[17] = port;
+    return 18U;
+}
+
 int asteriskd_xtables_private_chain_counts(
     const char *bytes, size_t length, const char *chain,
     size_t *declaration_count, size_t *rule_count) {
