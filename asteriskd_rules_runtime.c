@@ -18,6 +18,14 @@ struct output_token {
 static const char *const primary_mark_text = "0x20000000/0x60000000";
 static const char *const relay_mark_text = "0x40000000/0x60000000";
 
+// The relay takes over the two transports the core's transparent inbound
+// serves. Every rule it builds names exactly one of them, so a rule that named
+// anything else would silently carry nothing.
+static bool relay_protocol_supported(const char *protocol) {
+    return protocol != NULL &&
+        (strcmp(protocol, "tcp") == 0 || strcmp(protocol, "udp") == 0);
+}
+
 static bool output_token_equals(const struct output_token *token, const char *text) {
     size_t length = strlen(text);
     return token->length == length && memcmp(token->bytes, text, length) == 0;
@@ -247,51 +255,26 @@ size_t asteriskd_xtables_fake_dns_arguments(
 // A fake answer is only routable through the core that produced it. When the
 // application policy leaves a connection out, it is not handed to the core, so
 // the fake address the platform resolver delivered would stay unreachable. Such
-// connections are redirected to the core's direct inbound, which resolves the
-// fake address back to its domain and connects without the proxy. Only
-// traffic the policy did not mark is redirected, and the supervised core is
-// exempt so its own direct connections cannot be captured again.
-size_t asteriskd_xtables_fake_ip_relay_arguments(
-    const char *pool, const char **arguments) {
-    size_t pool_length = pool == NULL ? 0U : strnlen(pool, ASTERISKD_MAX_CIDR);
-    if (arguments == NULL || pool_length == 0U || pool_length >= ASTERISKD_MAX_CIDR ||
-        strpbrk(pool, " \t\r\n") != NULL) return 0U;
-    arguments[0] = "-d";
-    arguments[1] = pool;
-    arguments[2] = "-p";
-    arguments[3] = "tcp";
-    arguments[4] = "-m";
-    arguments[5] = "mark";
-    arguments[6] = "!";
-    arguments[7] = "--mark";
-    arguments[8] = primary_mark_text;
-    arguments[9] = "-m";
-    arguments[10] = "owner";
-    arguments[11] = "!";
-    arguments[12] = "--gid-owner";
-    arguments[13] = "3005";
-    arguments[14] = "-j";
-    arguments[15] = "REDIRECT";
-    arguments[16] = "--to-ports";
-    arguments[17] = ASTERISKD_FAKE_IP_RELAY_PORT_TEXT;
-    return 18U;
-}
-
-// Datagrams cannot be handed over the way connections are: the core's redir
-// inbound only serves TCP, so a redirected datagram would never be read.
-// Instead the datagram is marked, routed into the local table by a rule of its
-// own and taken over by a TPROXY inbound, which is how the core receives
-// datagrams for proxied applications already.
+// traffic is handed to the core's direct inbound instead, which resolves the
+// fake address back to its domain and connects without the proxy. Only traffic
+// the policy did not mark is taken over, and the supervised core is exempt so
+// its own direct connections cannot be captured again.
+//
+// The mark is applied per transport. Everything it selects is routed into the
+// local table, where only the transparent rules below accept it, and those
+// serve connections and datagrams: another protocol taken there would be lost.
 //
 // The mark has to select the applications the policy leaves out, and which
 // shape expresses that depends on the policy: a blacklist without a matcher
 // makes them known by uid, everything else by the absence of the proxy mark.
 // A NULL uid selects the latter.
 size_t asteriskd_xtables_fake_ip_relay_mark_arguments(
-    const char *pool, const char *uid, const char **arguments) {
+    const char *pool, const char *uid, const char *protocol,
+    const char **arguments) {
     size_t pool_length = pool == NULL ? 0U : strnlen(pool, ASTERISKD_MAX_CIDR);
     if (arguments == NULL || pool_length == 0U || pool_length >= ASTERISKD_MAX_CIDR ||
         strpbrk(pool, " \t\r\n") != NULL) return 0U;
+    if (!relay_protocol_supported(protocol)) return 0U;
     if (uid != NULL) {
         size_t uid_length = strnlen(uid, 16U);
         if (uid_length == 0U || uid_length >= 16U ||
@@ -301,7 +284,7 @@ size_t asteriskd_xtables_fake_ip_relay_mark_arguments(
     arguments[count++] = "-d";
     arguments[count++] = pool;
     arguments[count++] = "-p";
-    arguments[count++] = "udp";
+    arguments[count++] = protocol;
     if (uid == NULL) {
         arguments[count++] = "-m";
         arguments[count++] = "mark";
@@ -326,14 +309,19 @@ size_t asteriskd_xtables_fake_ip_relay_mark_arguments(
     return count;
 }
 
-// Takes over the marked datagrams on the local path. The destination is kept
+// Takes over the marked traffic on the local path. The destination is kept
 // unchanged, so the core still learns the fake address the application wanted
-// to reach.
-size_t asteriskd_xtables_fake_ip_relay_datagram_arguments(const char **arguments) {
-    if (arguments == NULL) return 0U;
+// to reach: connections are delivered to the transparent socket under the
+// address they were sent to, and datagrams carry that address beside them.
+//
+// Both transports share the endpoint, because the core's transparent inbound
+// serves both on one port.
+size_t asteriskd_xtables_fake_ip_relay_transparent_arguments(
+    const char *protocol, const char **arguments) {
+    if (arguments == NULL || !relay_protocol_supported(protocol)) return 0U;
     size_t count = 0U;
     arguments[count++] = "-p";
-    arguments[count++] = "udp";
+    arguments[count++] = protocol;
     arguments[count++] = "-m";
     arguments[count++] = "mark";
     arguments[count++] = "--mark";
@@ -341,7 +329,7 @@ size_t asteriskd_xtables_fake_ip_relay_datagram_arguments(const char **arguments
     arguments[count++] = "-j";
     arguments[count++] = "TPROXY";
     arguments[count++] = "--on-port";
-    arguments[count++] = ASTERISKD_FAKE_IP_RELAY_UDP_PORT_TEXT;
+    arguments[count++] = ASTERISKD_FAKE_IP_RELAY_PORT_TEXT;
     arguments[count++] = "--on-ip";
     arguments[count++] = "0.0.0.0";
     arguments[count++] = "--tproxy-mark";
