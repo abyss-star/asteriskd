@@ -2870,16 +2870,79 @@ static int system_append_tproxy(struct asteriskd_system_supervisor *system,
         "-A", chain, arguments, count);
 }
 
+// Local DNS interception follows the application policy only for locally
+// generated traffic, where the owning uid is known and the policy is applied by
+// the uid rules instead of the BPF matcher.
+static bool system_dns_scope_follows_app_policy(const struct asteriskd_config *config) {
+    return config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_APP_POLICY &&
+        config->app_policy_mode != ASTERISKD_APP_POLICY_GLOBAL &&
+        !config->matcher.enabled;
+}
+
+// Appends one DNS rule limited to a single uid. System resolver uids are passed
+// with mark=false so that name resolution performed by the platform resolver on
+// behalf of an application is never attributed to the proxy. The supervised core
+// gid needs no exemption here: uid 0 is never part of the application selection.
+static int system_append_dns_uid_rule(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain, uint32_t uid, bool mark) {
+    char uid_text[16U];
+    if (snprintf(uid_text, sizeof(uid_text), "%" PRIu32, uid) <= 0) return -1;
+    const char *arguments[16U];
+    size_t count = 0U;
+    arguments[count++] = "-p";
+    arguments[count++] = "udp";
+    arguments[count++] = "-m";
+    arguments[count++] = "owner";
+    arguments[count++] = "--uid-owner";
+    arguments[count++] = uid_text;
+    arguments[count++] = "-m";
+    arguments[count++] = "udp";
+    arguments[count++] = "--dport";
+    arguments[count++] = "53";
+    arguments[count++] = "-j";
+    arguments[count++] = mark ? "MARK" : "RETURN";
+    if (mark) {
+        arguments[count++] = "--set-xmark";
+        arguments[count++] = "0x20000000/0x60000000";
+    }
+    return system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+        "-A", chain, arguments, count);
+}
+
+// The DNS rule has to stay ahead of the application policy rules because those
+// mark every port, DNS included. With an application policy scope it therefore
+// exempts everything the policy does not cover, and the shared rule below marks
+// the remaining queries.
 static int system_append_dns_mark(struct asteriskd_system_supervisor *system,
-    enum asteriskd_ip_family family, const char *chain, bool bypass_core_gid) {
+    enum asteriskd_ip_family family, const char *chain, bool output) {
+    const struct asteriskd_config *config = &system->loaded_config.config;
+    if (output && system_dns_scope_follows_app_policy(config)) {
+        bool mark_selected = config->app_policy_mode != ASTERISKD_APP_POLICY_BLACKLIST;
+        for (size_t remaining = config->uid_count; remaining > 0U; --remaining) {
+            if (system_append_dns_uid_rule(system, family, chain,
+                    config->uids[remaining - 1U], mark_selected) != 0) return -1;
+        }
+        // Name resolution performed by the platform resolver answers for every
+        // application at once, so it can never be attributed to the proxy: a
+        // fake answer handed to it would reach applications the policy excludes.
+        // Both policies therefore leave the resolver uids on the system
+        // resolver; the configured DNS answer mode stays untouched.
+        if (system_append_dns_uid_rule(system, family, chain,
+                ASTERISKD_SYSTEM_DNS_UID, false) != 0 ||
+            system_append_dns_uid_rule(system, family, chain,
+                ASTERISKD_SYSTEM_UID, false) != 0) return -1;
+        if (mark_selected) return 0;
+        // Blacklist: every application the policy does not exclude is proxied,
+        // so the shared rule below covers them.
+    }
     const char *plain[] = {"-p", "udp", "-m", "udp", "--dport", "53",
         "-j", "MARK", "--set-xmark", "0x20000000/0x60000000"};
     const char *bypass[] = {"-p", "udp", "-m", "owner", "!", "--gid-owner", "3005",
         "-m", "udp", "--dport", "53", "-j", "MARK", "--set-xmark",
         "0x20000000/0x60000000"};
     return system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
-        "-A", chain, bypass_core_gid ? bypass : plain,
-        bypass_core_gid ? sizeof(bypass) / sizeof(bypass[0]) :
+        "-A", chain, output ? bypass : plain,
+        output ? sizeof(bypass) / sizeof(bypass[0]) :
             sizeof(plain) / sizeof(plain[0]));
 }
 

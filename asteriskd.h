@@ -299,6 +299,27 @@ enum asteriskd_app_policy_mode {
     ASTERISKD_APP_POLICY_WHITELIST,
 };
 
+// DNS interception scope for locally generated queries.
+//
+// ASTERISKD_DNS_HIJACK_GLOBAL intercepts DNS for every uid.
+//
+// ASTERISKD_DNS_HIJACK_APP_POLICY follows the application policy instead: only
+// selected applications have their own DNS queries intercepted, while the
+// Android resolver uids (root and AID_DNS) always stay on the system resolver,
+// under both policies. Those queries answer for every application at once, so
+// they cannot be attributed to the proxy and a fake answer handed to them would
+// reach applications the policy excludes. The configured answer mode
+// (fake-ip or redir-host) is unaffected by this scope.
+enum asteriskd_dns_hijack_scope {
+    ASTERISKD_DNS_HIJACK_GLOBAL,
+    ASTERISKD_DNS_HIJACK_APP_POLICY,
+};
+
+// The Android resolver (netd) performs application name resolution through
+// these uids, so they can never be attributed to a single application.
+#define ASTERISKD_SYSTEM_UID 0U
+#define ASTERISKD_SYSTEM_DNS_UID 1052U
+
 enum asteriskd_helper_type {
     ASTERISKD_HELPER_NONE,
     ASTERISKD_HELPER_HEV_SOCKS5_TUNNEL,
@@ -381,6 +402,7 @@ struct asteriskd_config {
     bool enable_fake_dns;
     bool has_fake_dns_ipv4_pool;
     char fake_dns_ipv4_pool[ASTERISKD_MAX_CIDR];
+    enum asteriskd_dns_hijack_scope dns_hijack_scope;
     char ignored_interfaces[ASTERISKD_MAX_INTERFACES][ASTERISKD_MAX_INTERFACE_NAME];
     size_t ignored_interface_count;
     char virtual_interfaces[ASTERISKD_MAX_INTERFACES][ASTERISKD_MAX_INTERFACE_NAME];
@@ -488,6 +510,9 @@ struct asteriskd_packet_model_input {
     bool icmp_echo;
     bool bypass_uid;
     bool uid_listed;
+    // Set when the packet belongs to a platform resolver uid (root or AID_DNS):
+    // such a query cannot be attributed to the application that asked for it.
+    bool system_resolver_uid;
     bool core_gid;
     bool local_address;
     bool proxy_private;

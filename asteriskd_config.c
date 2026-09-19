@@ -605,11 +605,23 @@ static int parse_network(
     static const char *const names[] = {
         "enableIpv6", "disableSystemIpv6", "enableLocalDns", "enableFakeDns", "fakeDnsIpv4Pool",
         "ignoredInterfaces", "virtualInterfaces", "hotspotInterfacePrefixes", "proxyPrivateCidrs",
-        "bypassPrivateCidrs", "appPolicy",
+        "bypassPrivateCidrs", "appPolicy", "dnsHijackScope",
     };
-    size_t values[11];
-    if (object_fields(document, object, names, 11U, values) != 0 ||
-        parse_bool(document, values[0], &config->enable_ipv6) != 0 ||
+    size_t values[12];
+    // The DNS hijack scope is optional: configurations written before it existed
+    // keep the historical global interception behaviour.
+    bool has_dns_hijack_scope = object_fields(document, object, names, 12U, values) == 0;
+    if (!has_dns_hijack_scope &&
+        object_fields(document, object, names, 11U, values) != 0) return -1;
+    config->dns_hijack_scope = ASTERISKD_DNS_HIJACK_GLOBAL;
+    if (has_dns_hijack_scope) {
+        if (token_equals(document, values[11], "global")) {
+            config->dns_hijack_scope = ASTERISKD_DNS_HIJACK_GLOBAL;
+        } else if (token_equals(document, values[11], "appPolicy")) {
+            config->dns_hijack_scope = ASTERISKD_DNS_HIJACK_APP_POLICY;
+        } else return -1;
+    }
+    if (parse_bool(document, values[0], &config->enable_ipv6) != 0 ||
         parse_bool(document, values[1], &config->disable_system_ipv6) != 0 ||
         parse_bool(document, values[2], &config->enable_local_dns) != 0 ||
         parse_bool(document, values[3], &config->enable_fake_dns) != 0) return -1;
@@ -935,6 +947,10 @@ static int validate_cross_fields(struct asteriskd_config *config) {
         unsigned long prefix = strtoul(slash + 1, NULL, 10);
         if (prefix < 1UL || prefix > 30UL) return -1;
     } else if (config->has_fake_dns_ipv4_pool) return -1;
+    // Following the application policy for DNS only makes sense when an
+    // application policy exists; the global policy already covers every uid.
+    if (config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_APP_POLICY &&
+        config->app_policy_mode == ASTERISKD_APP_POLICY_GLOBAL) return -1;
     if ((config->mode == ASTERISKD_MODE_TPROXY) != config->has_transparent_port ||
         (config->mode == ASTERISKD_MODE_TUN) != config->has_tunnel_name) return -1;
     if (config->mode != ASTERISKD_MODE_TPROXY && config->has_transparent_port) return -1;

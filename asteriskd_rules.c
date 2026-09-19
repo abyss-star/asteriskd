@@ -339,6 +339,42 @@ static bool packet_is_selected(
     return input->uid_listed;
 }
 
+static bool packet_is_dns(const struct asteriskd_packet_model_input *input) {
+    return input->protocol == ASTERISKD_PACKET_UDP && input->destination_port_53;
+}
+
+// DNS interception follows the application policy only for locally generated
+// traffic with a uid based policy; the BPF matcher and the global policy keep
+// the shared rule.
+static bool packet_dns_follows_app_policy(
+    const struct asteriskd_config *config,
+    const struct asteriskd_rule_plan *plan) {
+    return config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_APP_POLICY &&
+        config->app_policy_mode != ASTERISKD_APP_POLICY_GLOBAL && !plan->uses_matcher;
+}
+
+static bool packet_dns_is_excluded(
+    const struct asteriskd_config *config,
+    const struct asteriskd_rule_plan *plan,
+    const struct asteriskd_packet_model_input *input) {
+    if (!packet_dns_follows_app_policy(config, plan) || !packet_is_dns(input)) return false;
+    // The platform resolver answers for every application at once, so its
+    // queries are never attributed to the proxy under either policy.
+    if (input->system_resolver_uid) return true;
+    return config->app_policy_mode == ASTERISKD_APP_POLICY_BLACKLIST && input->uid_listed;
+}
+
+static bool packet_dns_is_selected(
+    const struct asteriskd_config *config,
+    const struct asteriskd_rule_plan *plan,
+    const struct asteriskd_packet_model_input *input) {
+    if (!packet_dns_follows_app_policy(config, plan)) return true;
+    if (config->app_policy_mode == ASTERISKD_APP_POLICY_BLACKLIST) return true;
+    // Whitelist: only the selected applications keep their own DNS inside the
+    // proxy; the platform resolver uids are never part of the selection.
+    return input->uid_listed && !input->system_resolver_uid;
+}
+
 int asteriskd_packet_model_decide(
     const struct asteriskd_config *config,
     const struct asteriskd_rule_plan *plan,
@@ -367,8 +403,10 @@ int asteriskd_packet_model_decide(
             normal = ASTERISKD_PACKET_RETURN;
         } else if (input->bypass_uid) {
             normal = ASTERISKD_PACKET_RETURN;
-        } else if (config->enable_local_dns && input->protocol == ASTERISKD_PACKET_UDP &&
-            input->destination_port_53 && !input->core_gid) {
+        } else if (packet_dns_is_excluded(config, plan, input)) {
+            normal = ASTERISKD_PACKET_RETURN;
+        } else if (config->enable_local_dns && packet_is_dns(input) &&
+            !input->core_gid && packet_dns_is_selected(config, plan, input)) {
             normal = ASTERISKD_PACKET_MARK_PRIMARY;
         } else if (input->local_address) {
             normal = ASTERISKD_PACKET_RETURN;
