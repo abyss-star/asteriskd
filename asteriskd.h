@@ -318,7 +318,14 @@ enum asteriskd_dns_hijack_scope {
 
 // Port of the supervised core's direct inbound. It is fixed rather than
 // configured so both sides of the contract agree on the same local endpoint.
+// The text form is used in rule arguments, which the private chain verification
+// matches against the kernel output long after they were built, so it has to
+// stay valid for the whole process lifetime.
 #define ASTERISKD_FAKE_IP_RELAY_PORT 65534U
+#define ASTERISKD_FAKE_IP_RELAY_PORT_TEXT "65534"
+#if ASTERISKD_FAKE_IP_RELAY_PORT != 65534U
+#error "ASTERISKD_FAKE_IP_RELAY_PORT_TEXT must match ASTERISKD_FAKE_IP_RELAY_PORT."
+#endif
 
 enum asteriskd_helper_type {
     ASTERISKD_HELPER_NONE,

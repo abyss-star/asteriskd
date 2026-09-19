@@ -250,8 +250,6 @@ size_t asteriskd_xtables_fake_ip_relay_arguments(
     size_t pool_length = pool == NULL ? 0U : strnlen(pool, ASTERISKD_MAX_CIDR);
     if (arguments == NULL || pool_length == 0U || pool_length >= ASTERISKD_MAX_CIDR ||
         strpbrk(pool, " \t\r\n") != NULL) return 0U;
-    char port[8U];
-    if (snprintf(port, sizeof(port), "%u", (unsigned)ASTERISKD_FAKE_IP_RELAY_PORT) <= 0) return 0U;
     arguments[0] = "-d";
     arguments[1] = pool;
     arguments[2] = "-p";
@@ -269,7 +267,7 @@ size_t asteriskd_xtables_fake_ip_relay_arguments(
     arguments[14] = "-j";
     arguments[15] = "REDIRECT";
     arguments[16] = "--to-ports";
-    arguments[17] = port;
+    arguments[17] = ASTERISKD_FAKE_IP_RELAY_PORT_TEXT;
     return 18U;
 }
 
