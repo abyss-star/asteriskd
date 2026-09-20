@@ -279,9 +279,7 @@ size_t asteriskd_xtables_fake_dns_arguments(
 size_t asteriskd_xtables_fake_ip_relay_mark_arguments(
     const char *pool, const char *uid, const char *protocol,
     const char **arguments) {
-    size_t pool_length = pool == NULL ? 0U : strnlen(pool, ASTERISKD_MAX_CIDR);
-    if (arguments == NULL || pool_length == 0U || pool_length >= ASTERISKD_MAX_CIDR ||
-        strpbrk(pool, " \t\r\n") != NULL) return 0U;
+    if (arguments == NULL || !relay_text_supported(pool, ASTERISKD_MAX_CIDR, false)) return 0U;
     if (!relay_protocol_supported(protocol)) return 0U;
     if (uid != NULL && !relay_text_supported(uid, 16U, true)) return 0U;
     size_t count = 0U;

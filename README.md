@@ -125,6 +125,13 @@ Top-level sections are:
 - nullable `helper` (`hev-socks5-tunnel` or `bpf2socks`);
 - nullable `matcher`, containing only its executable path.
 
+Two keys are optional, so a configuration written before they existed keeps
+parsing: `network.dnsHijackScope` defaults to `global`, and
+`modeOptions.fakeIpRelayPort` defaults to the fixed relay port. The relay port is
+accepted by the modes that enforce the application policy themselves and has to
+differ from the tproxy port, and `appPolicy` requires an application policy other
+than `global`.
+
 Direct CIDRs are inline immutable snapshots. The supervisor renders matcher and
 bpf2socks policy/config into sealed anonymous descriptors and passes
 `/proc/self/fd/N`; it never creates policy, helper-config, direct-CIDR, PID,

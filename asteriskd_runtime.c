@@ -3072,10 +3072,13 @@ static int system_append_relay_return_uid(struct asteriskd_system_supervisor *sy
 
 // Selects the applications the relay takes over. TPROXY and TUN2SOCKS mark the
 // applications they proxy, so there the relay is everything the policy left
-// unmarked, whichever shape that policy has. BPF2SOCKS decides in the kernel and
-// marks nothing, so there the relay follows the uid list that program uses: a
-// blacklist names the applications it bypasses, a whitelist the ones it proxies,
-// which the relay returns before marking everything behind them.
+// unmarked, whichever shape that policy has: an application the policy bypasses
+// by uid or an interface it leaves alone receives fake answers just like the
+// ones it excludes, and the pool match keeps the rule to the addresses only the
+// core can translate. BPF2SOCKS decides in the kernel and marks nothing, so there
+// the relay follows the uid list that program uses: a blacklist names the
+// applications it bypasses, a whitelist the ones it proxies, which the relay
+// returns before marking everything behind them.
 static int system_append_relay_marks(struct asteriskd_system_supervisor *system,
     enum asteriskd_ip_family family, const char *chain) {
     const struct asteriskd_config *config = &system->loaded_config.config;
