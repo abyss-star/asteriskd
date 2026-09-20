@@ -3071,30 +3071,31 @@ static int system_append_relay_return_uid(struct asteriskd_system_supervisor *sy
 }
 
 // Selects the applications the relay takes over. TPROXY and TUN2SOCKS mark the
-// applications they proxy, so there the relay is everything that stayed
-// unmarked, and a blacklist without a matcher is the one policy that has to name
-// its applications by uid because nothing is marked before they are returned.
-// BPF2SOCKS decides in the kernel instead and marks nothing: there the relay
-// follows the same uid list the eBPF program uses.
+// applications they proxy, so there the relay is everything the policy left
+// unmarked, whichever shape that policy has. BPF2SOCKS decides in the kernel and
+// marks nothing, so there the relay follows the uid list that program uses: a
+// blacklist names the applications it bypasses, a whitelist the ones it proxies,
+// which the relay returns before marking everything behind them.
 static int system_append_relay_marks(struct asteriskd_system_supervisor *system,
     enum asteriskd_ip_family family, const char *chain) {
     const struct asteriskd_config *config = &system->loaded_config.config;
-    bool whitelist = config->app_policy_mode == ASTERISKD_APP_POLICY_WHITELIST;
-    bool by_uid = config->mode == ASTERISKD_MODE_BPF2SOCKS ||
-        (!config->matcher.enabled && !whitelist);
-    if (!by_uid) return system_append_relay_mark_unmarked(system, family, chain);
-    if (!whitelist) {
+    if (config->mode != ASTERISKD_MODE_BPF2SOCKS) {
+        return system_append_relay_mark_unmarked(system, family, chain);
+    }
+    if (config->app_policy_mode != ASTERISKD_APP_POLICY_WHITELIST) {
         for (size_t remaining = config->uid_count; remaining > 0U; --remaining) {
             if (system_append_relay_mark_uid(system, family, chain,
                     config->uids[remaining - 1U]) != 0) return -1;
         }
         return 0;
     }
-    // A whitelist anyway knows the applications it proxies, so the relay returns
-    // their traffic and marks whatever is left behind them.
-    for (size_t index = 0U; index < config->uid_count; ++index) {
-        if (system_append_relay_return_uid(system, family, chain,
-                config->uids[index]) != 0) return -1;
+    // The whitelist the program proxies is the configured list plus the two uids
+    // the daemon adds to it in every mode, so the relay leaves those to the proxy
+    // and takes over whatever the program does not proxy.
+    for (size_t index = 0U; index < config->uid_count + 2U; ++index) {
+        uint32_t uid = index < config->uid_count ? config->uids[index] :
+            index == config->uid_count ? 0U : 1052U;
+        if (system_append_relay_return_uid(system, family, chain, uid) != 0) return -1;
     }
     return system_append_relay_mark_all(system, family, chain);
 }

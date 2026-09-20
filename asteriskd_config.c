@@ -989,7 +989,12 @@ static int validate_cross_fields(struct asteriskd_config *config) {
         return -1;
     }
     // Two inbounds cannot share one port, and the relay is the one that moves.
-    if (config->has_fake_ip_relay_port && config->has_transparent_port &&
+    // Only a configuration that can hand out fake answers is checked, because
+    // only there does the relay bring an inbound of its own: an application that
+    // keeps the core's inbounds to itself still names a port, and a configuration
+    // that never relays must not be rejected over a port nothing listens on.
+    if (config->has_fake_ip_relay_port && config->enable_fake_dns &&
+        config->has_transparent_port &&
         config->fake_ip_relay_port == config->transparent_port) return -1;
     if ((config->mode == ASTERISKD_MODE_TUN2SOCKS && config->helper.type != ASTERISKD_HELPER_HEV_SOCKS5_TUNNEL) ||
         (config->mode == ASTERISKD_MODE_BPF2SOCKS && config->helper.type != ASTERISKD_HELPER_BPF2SOCKS) ||

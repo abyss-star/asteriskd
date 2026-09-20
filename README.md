@@ -119,7 +119,7 @@ Top-level sections are:
 - `schemaVersion`, `owner`, `coreType`, and `mode`;
 - `paths` for the core executable/config, working directory, state, and log;
 - `core` for the readiness timeout and optional Mihomo AGE secret;
-- `modeOptions` for the tproxy port or TUN name;
+- `modeOptions` for the tproxy port, the TUN name, or the fake IP relay port;
 - `network` for IPv6 intent, DNS/fake-DNS, interface selectors, private CIDRs,
   UID policy, and inline canonical direct CIDRs;
 - nullable `helper` (`hev-socks5-tunnel` or `bpf2socks`);
