@@ -2985,6 +2985,22 @@ static int system_append_dns_mark(struct asteriskd_system_supervisor *system,
             sizeof(plain) / sizeof(plain[0]));
 }
 
+// The module scope installs no interception: the queries keep their own
+// destination and the platform resolver reaches its configured server exactly as
+// it does without a proxy. The bypass has to stand where the interception rule
+// would, ahead of the application policy rules and of the private destination
+// bypasses, so no later rule can mark the query on its way out. Both transports
+// are covered because the resolver retries a truncated answer over TCP.
+static int system_append_dns_bypass(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain) {
+    const char *udp[] = {"-p", "udp", "-m", "udp", "--dport", "53", "-j", "RETURN"};
+    const char *tcp[] = {"-p", "tcp", "-m", "tcp", "--dport", "53", "-j", "RETURN"};
+    if (system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+            "-A", chain, udp, sizeof(udp) / sizeof(udp[0])) != 0) return -1;
+    return system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+        "-A", chain, tcp, sizeof(tcp) / sizeof(tcp[0]));
+}
+
 // Traffic the policy leaves out reaches the core the same way proxied traffic
 // does, but under a mark of its own, so the transparent step can tell the two
 // apart and pick the inbound that connects without the proxy. Both transports
@@ -3189,8 +3205,11 @@ static int system_populate_common_output_prefix(
         if (system_append_uid_return(system, family, chain,
                 config->bypass_uids[remaining - 1U]) != 0) return -1;
     }
-    if (config->enable_local_dns && system_append_dns_mark(system, family, chain, true) != 0) {
-        return -1;
+    if (config->enable_local_dns) {
+        const int dns = config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_MODULE
+            ? system_append_dns_bypass(system, family, chain)
+            : system_append_dns_mark(system, family, chain, true);
+        if (dns != 0) return -1;
     }
     if (system_append_local_bypass_interval(
             system, family, chain, local_begin, local_end) != 0) return -1;
@@ -3212,7 +3231,8 @@ static int system_populate_tproxy_prerouting(
     struct asteriskd_system_supervisor *system, enum asteriskd_ip_family family,
     const char *chain, const char *local_begin, const char *local_end) {
     const struct asteriskd_config *config = &system->loaded_config.config;
-    if (config->enable_local_dns && system_append_dns_tproxy(system, family, chain) != 0) return -1;
+    if (config->enable_local_dns && config->dns_hijack_scope != ASTERISKD_DNS_HIJACK_MODULE &&
+        system_append_dns_tproxy(system, family, chain) != 0) return -1;
     if (family == ASTERISKD_IP_FAMILY_IPV6 && !config->enable_ipv6) return 0;
     if (system_append_ipsec_udp_bypass(system, family, chain) != 0) return -1;
     if (system_append_local_bypass_interval(
@@ -3266,7 +3286,10 @@ static int system_populate_tproxy_output(
     const char *chain, const char *local_begin, const char *local_end) {
     const struct asteriskd_config *config = &system->loaded_config.config;
     if (family == ASTERISKD_IP_FAMILY_IPV6 && !config->enable_ipv6) {
-        return config->enable_local_dns ? system_append_dns_mark(system, family, chain, true) : 0;
+        if (!config->enable_local_dns) return 0;
+        return config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_MODULE
+            ? system_append_dns_bypass(system, family, chain)
+            : system_append_dns_mark(system, family, chain, true);
     }
     if (system_populate_common_output_prefix(
             system, family, chain, local_begin, local_end) != 0) return -1;
@@ -3287,7 +3310,8 @@ static int system_populate_tun_prerouting(
     struct asteriskd_system_supervisor *system, enum asteriskd_ip_family family,
     const char *chain, const char *local_begin, const char *local_end) {
     const struct asteriskd_config *config = &system->loaded_config.config;
-    if (config->enable_local_dns && system_append_dns_mark(system, family, chain, false) != 0) {
+    if (config->enable_local_dns && config->dns_hijack_scope != ASTERISKD_DNS_HIJACK_MODULE &&
+        system_append_dns_mark(system, family, chain, false) != 0) {
         return -1;
     }
     if (family == ASTERISKD_IP_FAMILY_IPV6 && !config->enable_ipv6) return 0;
@@ -3327,7 +3351,10 @@ static int system_populate_tun_output(
     const struct asteriskd_config *config = &system->loaded_config.config;
     const char *tunnel = config->helper.value.hev.tunnel_name;
     if (family == ASTERISKD_IP_FAMILY_IPV6 && !config->enable_ipv6) {
-        return config->enable_local_dns ? system_append_dns_mark(system, family, chain, true) : 0;
+        if (!config->enable_local_dns) return 0;
+        return config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_MODULE
+            ? system_append_dns_bypass(system, family, chain)
+            : system_append_dns_mark(system, family, chain, true);
     }
     if (system_populate_common_output_prefix(
             system, family, chain, local_begin, local_end) != 0) return -1;

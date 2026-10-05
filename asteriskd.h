@@ -325,9 +325,18 @@ enum asteriskd_app_policy_mode {
 // direct inbound instead of being sent to an address only the core can
 // translate. The configured answer mode (fake-ip or redir-host) is never
 // rewritten by this scope.
+//
+// ASTERISKD_DNS_HIJACK_MODULE hands local DNS to an external per application
+// module that answers inside the application process. The daemon then installs
+// no interception at all: locally generated queries keep their own destination,
+// so the applications the policy leaves out resolve through the platform
+// resolver as they would without a proxy. The supervised core still answers for
+// the applications the module covers, which reach it directly, so the answer
+// mode and the fake address pool stay in effect for them.
 enum asteriskd_dns_hijack_scope {
     ASTERISKD_DNS_HIJACK_GLOBAL,
     ASTERISKD_DNS_HIJACK_APP_POLICY,
+    ASTERISKD_DNS_HIJACK_MODULE,
 };
 
 // Port the relay takes its traffic over to. The configuration may choose another

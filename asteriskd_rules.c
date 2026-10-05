@@ -441,7 +441,9 @@ int asteriskd_packet_model_decide(
         return 0;
     }
     if (input->protocol != ASTERISKD_PACKET_TCP && input->protocol != ASTERISKD_PACKET_UDP) return 0;
-    bool forced_ipv6_dns = config->enable_local_dns && !config->disable_system_ipv6 &&
+    bool forced_ipv6_dns = config->enable_local_dns &&
+        config->dns_hijack_scope != ASTERISKD_DNS_HIJACK_MODULE &&
+        !config->disable_system_ipv6 &&
         input->ipv6 && input->protocol == ASTERISKD_PACKET_UDP && input->destination_port_53;
     if (input->ipv6 && !config->enable_ipv6 && !forced_ipv6_dns) return 0;
 
@@ -450,6 +452,12 @@ int asteriskd_packet_model_decide(
         if (input->output_virtual_interface) {
             normal = ASTERISKD_PACKET_RETURN;
         } else if (input->bypass_uid) {
+            normal = ASTERISKD_PACKET_RETURN;
+        } else if (config->enable_local_dns && input->destination_port_53 &&
+            config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_MODULE) {
+            // The module answers inside the processes the policy covers, so a
+            // query the daemon still sees belongs to an application the module
+            // left alone, and leaving it alone is the whole point of the scope.
             normal = ASTERISKD_PACKET_RETURN;
         } else if (config->enable_local_dns && input->protocol == ASTERISKD_PACKET_UDP &&
             input->destination_port_53 && !input->core_gid) {
@@ -469,8 +477,8 @@ int asteriskd_packet_model_decide(
             normal = selected_packet_action(config, input->direction);
         }
     } else {
-        if (config->enable_local_dns && input->protocol == ASTERISKD_PACKET_UDP &&
-            input->destination_port_53) {
+        if (config->enable_local_dns && config->dns_hijack_scope != ASTERISKD_DNS_HIJACK_MODULE &&
+            input->protocol == ASTERISKD_PACKET_UDP && input->destination_port_53) {
             normal = selected_packet_action(config, input->direction);
         } else if (input->local_address) {
             normal = ASTERISKD_PACKET_RETURN;

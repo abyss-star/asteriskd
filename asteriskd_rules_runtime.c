@@ -399,12 +399,17 @@ size_t asteriskd_xtables_fake_ip_relay_transparent_arguments(
 // answers, the policy actually leaves applications out of the proxy, and the
 // mode takes its application policy from netfilter. A core managed mode routes
 // every application itself, so nothing is left for a relay to keep working.
+//
+// Both scopes that keep the excluded applications in mind run it. The module
+// scope needs it least often, but for the same reason: a fake answer an
+// application received before the list changed outlives that change, and the
+// relay is what keeps such an address reachable until it expires.
 bool asteriskd_fake_ip_relay_enabled(const struct asteriskd_config *config) {
     return config != NULL &&
         (config->mode == ASTERISKD_MODE_TPROXY ||
             config->mode == ASTERISKD_MODE_TUN2SOCKS ||
             config->mode == ASTERISKD_MODE_BPF2SOCKS) &&
-        config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_APP_POLICY &&
+        config->dns_hijack_scope != ASTERISKD_DNS_HIJACK_GLOBAL &&
         config->app_policy_mode != ASTERISKD_APP_POLICY_GLOBAL &&
         config->enable_fake_dns && config->has_fake_dns_ipv4_pool;
 }

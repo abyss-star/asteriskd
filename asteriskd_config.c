@@ -620,6 +620,8 @@ static int parse_network(
             config->dns_hijack_scope = ASTERISKD_DNS_HIJACK_GLOBAL;
         } else if (token_equals(document, values[11], "appPolicy")) {
             config->dns_hijack_scope = ASTERISKD_DNS_HIJACK_APP_POLICY;
+        } else if (token_equals(document, values[11], "module")) {
+            config->dns_hijack_scope = ASTERISKD_DNS_HIJACK_MODULE;
         } else return -1;
     }
     if (parse_bool(document, values[0], &config->enable_ipv6) != 0 ||
@@ -979,6 +981,13 @@ static int validate_cross_fields(struct asteriskd_config *config) {
     // application policy exists; the global policy already covers every uid.
     if (config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_APP_POLICY &&
         config->app_policy_mode == ASTERISKD_APP_POLICY_GLOBAL) return -1;
+    // The module scope answers through the supervised core, so the core has to
+    // keep its local DNS and hand out the addresses the module returns, and the
+    // list is the only thing that tells the module which processes to answer.
+    if (config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_MODULE &&
+        (!config->enable_local_dns || !config->enable_fake_dns ||
+            !config->has_fake_dns_ipv4_pool ||
+            config->app_policy_mode == ASTERISKD_APP_POLICY_GLOBAL)) return -1;
     if ((config->mode == ASTERISKD_MODE_TPROXY) != config->has_transparent_port ||
         (config->mode == ASTERISKD_MODE_TUN) != config->has_tunnel_name) return -1;
     if (config->mode != ASTERISKD_MODE_TPROXY && config->has_transparent_port) return -1;
