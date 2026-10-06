@@ -455,10 +455,18 @@ int asteriskd_packet_model_decide(
             normal = ASTERISKD_PACKET_RETURN;
         } else if (config->enable_local_dns && input->destination_port_53 &&
             config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_MODULE) {
-            // The module answers inside the processes the policy covers, so a
-            // query the daemon still sees belongs to an application the module
-            // left alone, and leaving it alone is the whole point of the scope.
-            normal = ASTERISKD_PACKET_RETURN;
+            // The module answers inside the processes the policy covers, so the
+            // queries the daemon still sees are the ones it could not answer:
+            // those of the applications the policy leaves out, and those an
+            // application asked from a socket of its own, which keep their uid
+            // and therefore still reach the interception while the platform
+            // resolver path does not. A matcher decides without naming an
+            // application, so it keeps the unconditional bypass, and the rules
+            // that invert a blacklist stop at the first application uid, so the
+            // platform uids never enter this decision.
+            const bool carried = !input->core_gid && !plan->uses_matcher &&
+                packet_is_selected(config, plan, input);
+            normal = carried ? ASTERISKD_PACKET_MARK_PRIMARY : ASTERISKD_PACKET_RETURN;
         } else if (config->enable_local_dns && input->protocol == ASTERISKD_PACKET_UDP &&
             input->destination_port_53 && !input->core_gid) {
             normal = ASTERISKD_PACKET_MARK_PRIMARY;

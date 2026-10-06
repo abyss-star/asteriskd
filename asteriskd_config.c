@@ -1005,9 +1005,11 @@ static int validate_cross_fields(struct asteriskd_config *config) {
     // keeps the core's inbounds to itself still names a port, and a configuration
     // that never relays must not be rejected over a port nothing listens on. A
     // transparent port only exists in the mode that proxies with it, which is one
-    // of the three the relay serves.
+    // of the three the relay serves. The module scope intercepts through the same
+    // transparent port as the scope that follows the application policy, so the
+    // collision counts for both.
     if (config->enable_fake_dns && config->has_fake_dns_ipv4_pool &&
-        config->dns_hijack_scope == ASTERISKD_DNS_HIJACK_APP_POLICY &&
+        config->dns_hijack_scope != ASTERISKD_DNS_HIJACK_GLOBAL &&
         config->app_policy_mode != ASTERISKD_APP_POLICY_GLOBAL &&
         config->has_transparent_port &&
         config->fake_ip_relay_port == config->transparent_port) return -1;

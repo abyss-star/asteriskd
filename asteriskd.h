@@ -327,12 +327,15 @@ enum asteriskd_app_policy_mode {
 // rewritten by this scope.
 //
 // ASTERISKD_DNS_HIJACK_MODULE hands local DNS to an external per application
-// module that answers inside the application process. The daemon then installs
-// no interception at all: locally generated queries keep their own destination,
-// so the applications the policy leaves out resolve through the platform
-// resolver as they would without a proxy. The supervised core still answers for
-// the applications the module covers, which reach it directly, so the answer
-// mode and the fake address pool stay in effect for them.
+// module that answers inside the application process. The module only reaches the
+// resolver path: a query that goes through the platform resolver answers for
+// every application at once and cannot be attributed, but one an application asks
+// from a socket of its own keeps its uid, so this scope intercepts exactly the
+// latter and hands it to the supervised core. The daemon then covers the same
+// applications the module covers on the path the module cannot see, while the
+// applications the policy leaves out keep resolving as they would without a
+// proxy, on both paths. The answer mode and the fake address pool stay in effect
+// for every path the module and the core share.
 enum asteriskd_dns_hijack_scope {
     ASTERISKD_DNS_HIJACK_GLOBAL,
     ASTERISKD_DNS_HIJACK_APP_POLICY,

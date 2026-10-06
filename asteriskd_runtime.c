@@ -2985,20 +2985,115 @@ static int system_append_dns_mark(struct asteriskd_system_supervisor *system,
             sizeof(plain) / sizeof(plain[0]));
 }
 
-// The module scope installs no interception: the queries keep their own
-// destination and the platform resolver reaches its configured server exactly as
-// it does without a proxy. The bypass has to stand where the interception rule
-// would, ahead of the application policy rules and of the private destination
-// bypasses, so no later rule can mark the query on its way out. Both transports
-// are covered because the resolver retries a truncated answer over TCP.
+// The module scope answers inside the processes the policy covers, so a query the
+// daemon still sees is one that module left alone -- unless the application asked
+// it from a socket of its own. The platform resolver answers for every
+// application at once and the query leaves as uid 0, but an application that
+// resolves for itself keeps its uid, and that traffic is what this scope can
+// still carry: the applications the module covers have such queries handed to the
+// supervised core and get the same fake addresses back that the module would have
+// returned in process. The applications the policy leaves out are put back in
+// front of the interception, in the place the other scopes keep the core's own
+// queries, so no later rule can mark a query this scope leaves alone.
+//
+// The rules stand where the interception rule stands, ahead of the application
+// policy rules and of the private destination bypasses. Both transports are
+// covered because the resolver retries a truncated answer over TCP.
+static int system_append_dns_protocol_rule(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain, const char *protocol,
+    const char *owner_flag, const char *owner_value, bool owner_negated, bool bypass) {
+    const char *arguments[16U];
+    size_t count = 0U;
+    arguments[count++] = "-p";
+    arguments[count++] = protocol;
+    if (owner_flag != NULL) {
+        arguments[count++] = "-m";
+        arguments[count++] = "owner";
+        if (owner_negated) arguments[count++] = "!";
+        arguments[count++] = owner_flag;
+        arguments[count++] = owner_value;
+    }
+    arguments[count++] = "-m";
+    arguments[count++] = protocol;
+    arguments[count++] = "--dport";
+    arguments[count++] = "53";
+    arguments[count++] = "-j";
+    if (bypass) {
+        arguments[count++] = "RETURN";
+    } else {
+        arguments[count++] = "MARK";
+        arguments[count++] = "--set-xmark";
+        arguments[count++] = "0x20000000/0x60000000";
+    }
+    return system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
+        "-A", chain, arguments, count);
+}
+
+static const char *const system_dns_protocols[] = {"udp", "tcp"};
+static const size_t system_dns_protocol_count =
+    sizeof(system_dns_protocols) / sizeof(system_dns_protocols[0]);
+
+static int system_append_dns_unconditional(struct asteriskd_system_supervisor *system,
+    enum asteriskd_ip_family family, const char *chain, bool bypass) {
+    for (size_t index = 0U; index < system_dns_protocol_count; ++index) {
+        if (system_append_dns_protocol_rule(system, family, chain,
+                system_dns_protocols[index], NULL, NULL, false, bypass) != 0) return -1;
+    }
+    return 0;
+}
+
+// Uids below the first application uid belong to the platform: netd, the system
+// server, and the vendor daemons resolve for the whole device through the
+// resolver, and a query of theirs cannot be attributed to the application that
+// asked for it. The module cannot answer inside those processes either, so the
+// scope leaves them to the platform resolver exactly as it did before any of
+// these applications were covered.
+static const char *const system_dns_non_application_uids = "0-9999";
+
 static int system_append_dns_bypass(struct asteriskd_system_supervisor *system,
     enum asteriskd_ip_family family, const char *chain) {
-    const char *udp[] = {"-p", "udp", "-m", "udp", "--dport", "53", "-j", "RETURN"};
-    const char *tcp[] = {"-p", "tcp", "-m", "tcp", "--dport", "53", "-j", "RETURN"};
-    if (system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
-            "-A", chain, udp, sizeof(udp) / sizeof(udp[0])) != 0) return -1;
-    return system_xtables_zero(system, family, ASTERISKD_IP_TABLE_MANGLE,
-        "-A", chain, tcp, sizeof(tcp) / sizeof(tcp[0]));
+    const struct asteriskd_config *config = &system->loaded_config.config;
+    // Nothing downstream can carry an intercepted query when IPv6 is off, and a
+    // BPF matcher decides in a place no rule can name an application from: both
+    // keep the unconditional bypass those configurations have always installed.
+    if ((family == ASTERISKD_IP_FAMILY_IPV6 && !config->enable_ipv6) ||
+        config->matcher.enabled) {
+        return system_append_dns_unconditional(system, family, chain, true);
+    }
+    if (config->app_policy_mode == ASTERISKD_APP_POLICY_GLOBAL) {
+        return system_append_dns_unconditional(system, family, chain, false);
+    }
+    // The core resolves for its own upstreams; without this it would intercept
+    // itself and never reach a server.
+    for (size_t index = 0U; index < system_dns_protocol_count; ++index) {
+        if (system_append_dns_protocol_rule(system, family, chain,
+                system_dns_protocols[index], "--gid-owner", "3005", false, true) != 0) return -1;
+    }
+    // The list means the same thing here as it does to the module: an entry of a
+    // whitelist is an application the module answers for, an entry of a blacklist
+    // is one it leaves alone.
+    const bool bypass_listed = config->app_policy_mode == ASTERISKD_APP_POLICY_BLACKLIST;
+    for (size_t remaining = config->uid_count; remaining > 0U; --remaining) {
+        char uid_text[16U];
+        if (snprintf(uid_text, sizeof(uid_text), "%" PRIu32,
+                config->uids[remaining - 1U]) <= 0) return -1;
+        for (size_t index = 0U; index < system_dns_protocol_count; ++index) {
+            if (system_append_dns_protocol_rule(system, family, chain,
+                    system_dns_protocols[index], "--uid-owner", uid_text,
+                    false, bypass_listed) != 0) return -1;
+        }
+    }
+    // Everything the list does not name takes the opposite decision. A blacklist
+    // is inverted, so the decision falls on every application rather than on a
+    // list the daemon was given: the rule names the applications by leaving the
+    // platform uids out, and no later rule can mark a query they sent.
+    if (!bypass_listed) return system_append_dns_unconditional(system, family, chain, true);
+    for (size_t index = 0U; index < system_dns_protocol_count; ++index) {
+        if (system_append_dns_protocol_rule(system, family, chain,
+                system_dns_protocols[index], "--uid-owner",
+                system_dns_non_application_uids, true, false) != 0) return -1;
+    }
+    return 0;
 }
 
 // Traffic the policy leaves out reaches the core the same way proxied traffic
